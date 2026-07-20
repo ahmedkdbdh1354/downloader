@@ -18,20 +18,7 @@
     "backend": {
       "root": "backend/",
       "framework": "fastapi",
-      "entrypoint": "app.main:app",
-      "bindings": [
-        {
-          "type": "service",
-          "service": "pot_provider",
-          "format": "url",
-          "env": "POT_PROVIDER_URL"
-        }
-      ]
-    },
-    "pot_provider": {
-      "root": "pot-provider/",
-      "framework": "express",
-      "entrypoint": "src/index.mts"
+      "entrypoint": "app.main:app"
     }
   },
   "rewrites": [

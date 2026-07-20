@@ -6,8 +6,8 @@ from fastapi.responses import FileResponse
 
 from .config import settings
 from .providers import provider_registry
-from .schemas import DownloadRequest, InspectRequest, MediaInfo, RecentDownload
-from .services import download_media, get_recent, inspect_media
+from .schemas import DownloadRequest, InspectRequest, MediaInfo
+from .services import download_media, inspect_media
 
 app = FastAPI(title=settings.app_name, version="1.0.0", description="Automatic multi-platform media inspection API")
 app.add_middleware(
@@ -38,9 +38,7 @@ def inspect(request: InspectRequest) -> MediaInfo:
 
 @app.post(f"{settings.api_prefix}/media/download")
 def download(request: DownloadRequest) -> FileResponse:
-    job_id, file_path = download_media(
-        str(request.url), request.format_id, request.title, request.platform, request.thumbnail
-    )
+    job_id, file_path = download_media(str(request.url), request.format_id)
     return FileResponse(
         path=file_path,
         filename=file_path.name,
@@ -58,8 +56,3 @@ def retrieve_download(job_id: str) -> FileResponse:
     if media_file is None:
         raise HTTPException(status_code=404, detail="الملف غير موجود أو انتهت صلاحيته")
     return FileResponse(path=media_file, filename=media_file.name, media_type="application/octet-stream")
-
-
-@app.get(f"{settings.api_prefix}/recent", response_model=list[RecentDownload])
-def recent_downloads() -> list[RecentDownload]:
-    return get_recent()

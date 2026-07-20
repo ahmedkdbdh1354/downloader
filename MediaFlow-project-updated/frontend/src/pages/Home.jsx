@@ -4,23 +4,36 @@ import UrlBox from '../components/UrlBox'
 import MediaCard from '../components/MediaCard'
 import RecentList from '../components/RecentList'
 import { api } from '../api'
-import { providers } from '../lib'
+import {
+  clearRecentDownloads,
+  detectDisabledProvider,
+  loadRecentDownloads,
+  providers,
+  RECENT_STORAGE_KEY,
+  saveRecentDownload,
+} from '../lib'
 
 export default function Home() {
   const [media, setMedia] = useState(null)
-  const [recent, setRecent] = useState([])
+  const [recent, setRecent] = useState(() => loadRecentDownloads())
   const [busy, setBusy] = useState(false)
   const [downloading, setDownloading] = useState('')
   const [downloadProgress, setDownloadProgress] = useState(null)
   const [error, setError] = useState('')
-  const [loadingRecent, setLoadingRecent] = useState(true)
-
-  const refreshRecent = () => api.recent()
-    .then((items) => setRecent(Array.isArray(items) ? items : []))
-    .catch(() => setRecent([]))
-    .finally(() => setLoadingRecent(false))
-  useEffect(() => { refreshRecent() }, [])
+  useEffect(() => {
+    const syncRecent = (event) => {
+      if (event.key === RECENT_STORAGE_KEY) setRecent(loadRecentDownloads())
+    }
+    window.addEventListener('storage', syncRecent)
+    return () => window.removeEventListener('storage', syncRecent)
+  }, [])
   async function inspect(url) {
+    const disabledProvider = detectDisabledProvider(url)
+    if (disabledProvider) {
+      setMedia(null)
+      setError(`روابط ${disabledProvider.name} غير مدعومة حاليًا. استخدم رابطًا من منصة أخرى.`)
+      return
+    }
     setBusy(true); setError(''); setMedia(null)
     try { setMedia(await api.inspect(url)) } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
@@ -34,7 +47,7 @@ export default function Home() {
       anchor.download = result.filename
       document.body.appendChild(anchor); anchor.click(); anchor.remove()
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
-      refreshRecent()
+      setRecent(saveRecentDownload(media, format))
     } catch (err) { setError(err.message) } finally { setDownloading(''); setDownloadProgress(null) }
   }
   return <>
@@ -47,6 +60,6 @@ export default function Home() {
       {media && <MediaCard media={media} onDownload={download} downloading={downloading} downloadProgress={downloadProgress} />}
     </section>
     <section className="mx-auto mt-12 max-w-4xl px-5 text-center"><p className="text-xs text-slate-600">مصادر يتعرف عليها النظام تلقائيًا</p><div className="mt-4 flex flex-wrap justify-center gap-2">{providers.map((item) => <span key={item.key} className="rounded-lg border border-white/[.07] bg-white/[.025] px-3 py-1.5 text-xs text-slate-400"><span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full" style={{ background: item.color }} />{item.name}</span>)}</div></section>
-    <div className="px-5"><RecentList items={recent} loading={loadingRecent} /></div>
+    <div className="px-5"><RecentList items={recent} onClear={() => { clearRecentDownloads(); setRecent([]) }} /></div>
   </>
 }

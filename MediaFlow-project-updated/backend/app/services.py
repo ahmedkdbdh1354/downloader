@@ -1,11 +1,5 @@
-import base64
-import binascii
-import json
-import re
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
 from typing import Any
 
 from imageio_ffmpeg import get_ffmpeg_exe
@@ -15,98 +9,31 @@ from yt_dlp.utils import DownloadError
 
 from .config import settings
 from .providers import provider_registry
-from .schemas import MediaFormat, MediaInfo, RecentDownload
+from .schemas import MediaFormat, MediaInfo
 
 
-history_lock = Lock()
-youtube_cookie_lock = Lock()
-youtube_cookie_file_cache: Path | None = None
 COMPATIBLE_VIDEO_CODECS = ("avc1", "h264")
 COMPATIBLE_AUDIO_CODECS = ("mp4a", "aac")
-
-
-def _youtube_cookie_file() -> Path | None:
-    """Materialise an optional Netscape cookie file in ephemeral storage."""
-    global youtube_cookie_file_cache
-    encoded = settings.youtube_cookies_base64.strip()
-    if not encoded:
-        return None
-    if youtube_cookie_file_cache and youtube_cookie_file_cache.exists():
-        return youtube_cookie_file_cache
-
-    with youtube_cookie_lock:
-        if youtube_cookie_file_cache and youtube_cookie_file_cache.exists():
-            return youtube_cookie_file_cache
-        try:
-            cookie_data = base64.b64decode(encoded, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="إعداد مصادقة YouTube على الخادم غير صالح.",
-            ) from exc
-        if b"\t" not in cookie_data or b"youtube.com" not in cookie_data.lower():
-            raise HTTPException(
-                status_code=503,
-                detail="ملف مصادقة YouTube على الخادم غير صالح.",
-            )
-        cookie_path = settings.download_dir.parent / "youtube-cookies.txt"
-        cookie_path.parent.mkdir(parents=True, exist_ok=True)
-        cookie_path.write_bytes(cookie_data)
-        cookie_path.chmod(0o600)
-        youtube_cookie_file_cache = cookie_path
-        return cookie_path
 
 
 def _runtime_options(url: str) -> dict[str, Any]:
     options: dict[str, Any] = {}
     if settings.ytdlp_proxy_url.strip():
         options["proxy"] = settings.ytdlp_proxy_url.strip()
-    if provider_registry.detect(url).key == "youtube":
-        cookie_file = _youtube_cookie_file()
-        if cookie_file:
-            options["cookiefile"] = str(cookie_file)
-        elif settings.pot_provider_url.strip():
-            options["extractor_args"] = {
-                "youtube": {
-                    "player_client": ["web_safari"],
-                    "player_skip": ["webpage", "configs", "initial_data"],
-                    # Generate the player token before the Innertube request;
-                    # otherwise a challenged hosting IP is rejected before the
-                    # normal on-demand provider hook gets a chance to run.
-                    "fetch_pot": ["always"],
-                },
-                "youtubepot-bgutilhttp": {
-                    "base_url": [settings.pot_provider_url.strip().rstrip("/")],
-                },
-            }
-        else:
-            # yt-dlp currently defaults to the android_vr guest client for
-            # many public videos. Some hosting IP ranges receive YouTube's bot
-            # challenge on that client while the regular Android client still
-            # exposes a phone/desktop-compatible MP4 stream with audio.
-            options["extractor_args"] = {
-                "youtube": {
-                    "player_client": ["android"],
-                    # Avoid the public watch page, which is the request most
-                    # often challenged on data-centre IP addresses. The Android
-                    # player API still supplies the metadata and media URL.
-                    "player_skip": ["webpage", "configs"],
-                },
-            }
     return options
 
 
 def _download_error(exc: DownloadError, fallback: str) -> HTTPException:
-    message = str(exc).lower()
-    if "sign in to confirm" in message or "not a bot" in message:
-        return HTTPException(
-            status_code=503,
-            detail=(
-                "رفض YouTube الطلب من خادم الاستضافة بسبب حماية الطلبات الآلية. "
-                "هذا ليس خطأً في الرابط؛ يلزم إعداد مصادقة YouTube أو عنوان خادم غير محظور."
-            ),
-        )
     return HTTPException(status_code=422, detail=fallback)
+
+
+def _ensure_supported(url: str) -> None:
+    disabled_provider = provider_registry.disabled(url)
+    if disabled_provider:
+        raise HTTPException(
+            status_code=422,
+            detail=f"روابط {disabled_provider.name} غير مدعومة حاليًا. استخدم رابطًا من منصة أخرى.",
+        )
 
 
 def _extract_info(url: str) -> dict[str, Any]:
@@ -119,8 +46,7 @@ def _extract_info(url: str) -> dict[str, Any]:
         "socket_timeout": 30,
         "retries": 3,
         "extractor_retries": 3,
-        # Prefer an IPv4 connection. This avoids a recurring Windows socket
-        # permission failure seen with some YouTube API requests.
+        # Prefer IPv4 for consistent behaviour across local and hosted runtimes.
         "source_address": "0.0.0.0",
     }
     options.update(_runtime_options(url))
@@ -142,9 +68,8 @@ def _extract_info(url: str) -> dict[str, Any]:
 def _normalise_formats(info: dict[str, Any]) -> list[MediaFormat]:
     """Return a short list of H.264/AAC MP4 choices that play broadly.
 
-    Most YouTube resolutions are split into a video-only stream and an audio-only
-    stream. The opaque IDs below mark that case so download_media can merge them
-    into one MP4 rather than returning the silent video stream to the user.
+    Some platforms expose video-only and audio-only streams. The opaque IDs below
+    mark that case so download_media can merge them into a single compatible MP4.
     """
     best_by_height: dict[int, tuple[dict[str, Any], bool]] = {}
     for item in info.get("formats") or []:
@@ -210,6 +135,7 @@ def _ffmpeg_location() -> str:
 
 
 def inspect_media(url: str) -> MediaInfo:
+    _ensure_supported(url)
     info = _extract_info(url)
     provider = provider_registry.detect(url)
     return MediaInfo(
@@ -224,33 +150,8 @@ def inspect_media(url: str) -> MediaInfo:
     )
 
 
-def _read_history() -> list[dict[str, Any]]:
-    settings.history_file.parent.mkdir(parents=True, exist_ok=True)
-    if not settings.history_file.exists():
-        return []
-    try:
-        return json.loads(settings.history_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-
-
-def get_recent() -> list[RecentDownload]:
-    return [RecentDownload.model_validate(item) for item in _read_history()[:10]]
-
-
-def _save_recent(item: RecentDownload) -> None:
-    with history_lock:
-        history = _read_history()
-        history.insert(0, item.model_dump(mode="json"))
-        settings.history_file.write_text(json.dumps(history[:30], ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _safe_stem(title: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title).strip().rstrip(".")
-    return cleaned[:100] or "media"
-
-
-def download_media(url: str, format_id: str, title: str | None, platform: str | None, thumbnail: str | None) -> tuple[str, Path]:
+def download_media(url: str, format_id: str) -> tuple[str, Path]:
+    _ensure_supported(url)
     job_id = uuid.uuid4().hex
     target_directory = settings.download_dir.resolve()
     target_directory.mkdir(parents=True, exist_ok=True)
@@ -272,8 +173,7 @@ def download_media(url: str, format_id: str, title: str | None, platform: str | 
     options.update(_runtime_options(url))
     try:
         with YoutubeDL(options) as downloader:
-            info = downloader.extract_info(url, download=True)
-            prepared = Path(downloader.prepare_filename(info))
+            downloader.extract_info(url, download=True)
         produced = sorted(target_directory.glob(f"{job_id}-*"), key=lambda path: path.stat().st_mtime, reverse=True)
         if not produced:
             raise RuntimeError("Download finished without a file")
@@ -284,13 +184,4 @@ def download_media(url: str, format_id: str, title: str | None, platform: str | 
             "لم يكتمل التنزيل. قد تكون الجودة غير متاحة أو الرابط مقيدًا.",
         ) from exc
 
-    item = RecentDownload(
-        id=job_id,
-        title=title or info.get("title") or _safe_stem(prepared.stem),
-        platform=platform or provider_registry.detect(url).name,
-        thumbnail=thumbnail or info.get("thumbnail"),
-        format_label=format_id,
-        created_at=datetime.now(timezone.utc),
-    )
-    _save_recent(item)
     return job_id, media_file

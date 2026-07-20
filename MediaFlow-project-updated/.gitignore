@@ -6,9 +6,6 @@ backend/__pycache__/
 backend/app/__pycache__/
 backend/app/providers/__pycache__/
 backend/data/downloads/
-pot-provider/node_modules/
-pot-provider/build/
-pot-provider/tsconfig.tsbuildinfo
 .env
 backend/.env
 

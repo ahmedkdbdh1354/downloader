@@ -37,10 +37,7 @@ async function downloadFile(media, formatId, onProgress) {
   const response = await fetch(`${API_ROOT}/media/download`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      url: media.source_url, format_id: formatId, title: media.title,
-      platform: media.platform, thumbnail: media.thumbnail,
-    }),
+    body: JSON.stringify({ url: media.source_url, format_id: formatId }),
   })
 
   if (!response.ok) {
@@ -72,7 +69,6 @@ async function downloadFile(media, formatId, onProgress) {
 export const api = {
   inspect: (url) => call('/media/inspect', { method: 'POST', body: JSON.stringify({ url }) }),
   download: downloadFile,
-  recent: () => call('/recent'),
   platforms: () => call('/platforms'),
   root: API_ROOT,
 }
