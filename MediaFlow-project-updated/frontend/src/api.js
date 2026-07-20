@@ -16,7 +16,9 @@ async function call(path, options = {}) {
     const fallback = response.status === 404
       ? 'خدمة التنزيل غير متصلة بالموقع حاليًا.'
       : 'حدث خطأ غير متوقع.'
-    throw new Error(payload?.detail || fallback)
+    const error = new Error(payload?.detail || fallback)
+    error.status = response.status
+    throw error
   }
   if (payload === null) {
     throw new Error('خدمة المعالجة غير متاحة حاليًا. حاول مجددًا بعد قليل.')
@@ -67,7 +69,15 @@ async function downloadFile(media, formatId, onProgress) {
 }
 
 export const api = {
-  inspect: (url) => call('/media/inspect', { method: 'POST', body: JSON.stringify({ url }) }),
+  inspect: async (url) => {
+    try {
+      return await call('/media/inspect', { method: 'POST', body: JSON.stringify({ url }) })
+    } catch (error) {
+      // A different serverless instance often gets a different TikTok challenge.
+      if (error.status !== 503) throw error
+      return call('/media/inspect', { method: 'POST', body: JSON.stringify({ url }) })
+    }
+  },
   download: downloadFile,
   platforms: () => call('/platforms'),
   root: API_ROOT,

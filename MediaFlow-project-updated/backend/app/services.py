@@ -1,10 +1,12 @@
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from imageio_ffmpeg import get_ffmpeg_exe
 from fastapi import HTTPException
 from yt_dlp import YoutubeDL
+from yt_dlp.networking.impersonate import ImpersonateTarget
 from yt_dlp.utils import DownloadError
 
 from .config import settings
@@ -14,6 +16,13 @@ from .schemas import MediaFormat, MediaInfo
 
 COMPATIBLE_VIDEO_CODECS = ("avc1", "h264")
 COMPATIBLE_AUDIO_CODECS = ("mp4a", "aac")
+TIKTOK_IMPERSONATION_TARGETS = ("chrome", "safari", "edge")
+TIKTOK_RETRYABLE_ERRORS = (
+    "universal data for rehydration",
+    "unable to download webpage",
+    "http error 403",
+    "challenge",
+)
 
 
 def _runtime_options(url: str) -> dict[str, Any]:
@@ -24,7 +33,58 @@ def _runtime_options(url: str) -> dict[str, Any]:
 
 
 def _download_error(exc: DownloadError, fallback: str) -> HTTPException:
-    return HTTPException(status_code=422, detail=fallback)
+    message = str(exc).lower()
+    is_transient_challenge = "[tiktok]" in message and any(
+        marker in message for marker in TIKTOK_RETRYABLE_ERRORS
+    )
+    return HTTPException(status_code=503 if is_transient_challenge else 422, detail=fallback)
+
+
+def _canonical_media_url(url: str) -> str:
+    """Remove tracking parameters that can change the TikTok challenge response."""
+    if provider_registry.detect(url).key != "tiktok":
+        return url
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _is_retryable_tiktok_error(url: str, exc: DownloadError) -> bool:
+    if provider_registry.detect(url).key != "tiktok":
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in TIKTOK_RETRYABLE_ERRORS)
+
+
+def _extract_with_resilience(url: str, options: dict[str, Any], *, download: bool) -> dict[str, Any]:
+    """Run yt-dlp and retry TikTok's intermittent browser challenge failures.
+
+    Each retry gets a fresh YoutubeDL session and a different browser TLS
+    fingerprint. Other providers keep their existing single-attempt behaviour.
+    """
+    canonical_url = _canonical_media_url(url)
+    targets: tuple[str | None, ...] = (
+        TIKTOK_IMPERSONATION_TARGETS
+        if provider_registry.detect(canonical_url).key == "tiktok"
+        else (None,)
+    )
+    last_error: DownloadError | None = None
+
+    for index, target in enumerate(targets):
+        attempt_options = {**options, **_runtime_options(canonical_url)}
+        if target:
+            attempt_options["impersonate"] = ImpersonateTarget.from_str(target)
+        try:
+            with YoutubeDL(attempt_options) as downloader:
+                return downloader.extract_info(canonical_url, download=download)
+        except DownloadError as exc:
+            last_error = exc
+            has_more_attempts = index < len(targets) - 1
+            if not has_more_attempts or not _is_retryable_tiktok_error(canonical_url, exc):
+                raise
+
+    # The loop always returns or raises, but this keeps the return type explicit.
+    assert last_error is not None
+    raise last_error
 
 
 def _ensure_supported(url: str) -> None:
@@ -49,10 +109,8 @@ def _extract_info(url: str) -> dict[str, Any]:
         # Prefer IPv4 for consistent behaviour across local and hosted runtimes.
         "source_address": "0.0.0.0",
     }
-    options.update(_runtime_options(url))
     try:
-        with YoutubeDL(options) as downloader:
-            info = downloader.extract_info(url, download=False)
+        info = _extract_with_resilience(url, options, download=False)
         if info and info.get("entries"):
             info = next((entry for entry in info["entries"] if entry), info)
         if not info:
@@ -170,10 +228,8 @@ def download_media(url: str, format_id: str) -> tuple[str, Path]:
         "extractor_retries": 3,
         "source_address": "0.0.0.0",
     }
-    options.update(_runtime_options(url))
     try:
-        with YoutubeDL(options) as downloader:
-            downloader.extract_info(url, download=True)
+        _extract_with_resilience(url, options, download=True)
         produced = sorted(target_directory.glob(f"{job_id}-*"), key=lambda path: path.stat().st_mtime, reverse=True)
         if not produced:
             raise RuntimeError("Download finished without a file")
