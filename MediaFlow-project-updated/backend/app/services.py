@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import re
 import uuid
@@ -17,8 +19,94 @@ from .schemas import MediaFormat, MediaInfo, RecentDownload
 
 
 history_lock = Lock()
+youtube_cookie_lock = Lock()
+youtube_cookie_file_cache: Path | None = None
 COMPATIBLE_VIDEO_CODECS = ("avc1", "h264")
 COMPATIBLE_AUDIO_CODECS = ("mp4a", "aac")
+
+
+def _youtube_cookie_file() -> Path | None:
+    """Materialise an optional Netscape cookie file in ephemeral storage."""
+    global youtube_cookie_file_cache
+    encoded = settings.youtube_cookies_base64.strip()
+    if not encoded:
+        return None
+    if youtube_cookie_file_cache and youtube_cookie_file_cache.exists():
+        return youtube_cookie_file_cache
+
+    with youtube_cookie_lock:
+        if youtube_cookie_file_cache and youtube_cookie_file_cache.exists():
+            return youtube_cookie_file_cache
+        try:
+            cookie_data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="إعداد مصادقة YouTube على الخادم غير صالح.",
+            ) from exc
+        if b"\t" not in cookie_data or b"youtube.com" not in cookie_data.lower():
+            raise HTTPException(
+                status_code=503,
+                detail="ملف مصادقة YouTube على الخادم غير صالح.",
+            )
+        cookie_path = settings.download_dir.parent / "youtube-cookies.txt"
+        cookie_path.parent.mkdir(parents=True, exist_ok=True)
+        cookie_path.write_bytes(cookie_data)
+        cookie_path.chmod(0o600)
+        youtube_cookie_file_cache = cookie_path
+        return cookie_path
+
+
+def _runtime_options(url: str) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    if settings.ytdlp_proxy_url.strip():
+        options["proxy"] = settings.ytdlp_proxy_url.strip()
+    if provider_registry.detect(url).key == "youtube":
+        cookie_file = _youtube_cookie_file()
+        if cookie_file:
+            options["cookiefile"] = str(cookie_file)
+        elif settings.pot_provider_url.strip():
+            options["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["web_safari"],
+                    "player_skip": ["webpage", "configs", "initial_data"],
+                    # Generate the player token before the Innertube request;
+                    # otherwise a challenged hosting IP is rejected before the
+                    # normal on-demand provider hook gets a chance to run.
+                    "fetch_pot": ["always"],
+                },
+                "youtubepot-bgutilhttp": {
+                    "base_url": [settings.pot_provider_url.strip().rstrip("/")],
+                },
+            }
+        else:
+            # yt-dlp currently defaults to the android_vr guest client for
+            # many public videos. Some hosting IP ranges receive YouTube's bot
+            # challenge on that client while the regular Android client still
+            # exposes a phone/desktop-compatible MP4 stream with audio.
+            options["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["android"],
+                    # Avoid the public watch page, which is the request most
+                    # often challenged on data-centre IP addresses. The Android
+                    # player API still supplies the metadata and media URL.
+                    "player_skip": ["webpage", "configs"],
+                },
+            }
+    return options
+
+
+def _download_error(exc: DownloadError, fallback: str) -> HTTPException:
+    message = str(exc).lower()
+    if "sign in to confirm" in message or "not a bot" in message:
+        return HTTPException(
+            status_code=503,
+            detail=(
+                "رفض YouTube الطلب من خادم الاستضافة بسبب حماية الطلبات الآلية. "
+                "هذا ليس خطأً في الرابط؛ يلزم إعداد مصادقة YouTube أو عنوان خادم غير محظور."
+            ),
+        )
+    return HTTPException(status_code=422, detail=fallback)
 
 
 def _extract_info(url: str) -> dict[str, Any]:
@@ -35,6 +123,7 @@ def _extract_info(url: str) -> dict[str, Any]:
         # permission failure seen with some YouTube API requests.
         "source_address": "0.0.0.0",
     }
+    options.update(_runtime_options(url))
     try:
         with YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=False)
@@ -44,9 +133,9 @@ def _extract_info(url: str) -> dict[str, Any]:
             raise ValueError("No media metadata was returned")
         return info
     except DownloadError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail="تعذر قراءة هذا الرابط. تأكد أنه رابط عام ومدعوم ثم حاول مجددًا.",
+        raise _download_error(
+            exc,
+            "تعذر قراءة هذا الرابط. تأكد أنه رابط عام ومدعوم ثم حاول مجددًا.",
         ) from exc
 
 
@@ -176,7 +265,11 @@ def download_media(url: str, format_id: str, title: str | None, platform: str | 
         "ffmpeg_location": _ffmpeg_location(),
         "restrictfilenames": False,
         "socket_timeout": 30,
+        "retries": 3,
+        "extractor_retries": 3,
+        "source_address": "0.0.0.0",
     }
+    options.update(_runtime_options(url))
     try:
         with YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=True)
@@ -186,7 +279,10 @@ def download_media(url: str, format_id: str, title: str | None, platform: str | 
             raise RuntimeError("Download finished without a file")
         media_file = next((path for path in produced if path.suffix.lower() not in {".part", ".ytdl"}), produced[0])
     except DownloadError as exc:
-        raise HTTPException(status_code=422, detail="لم يكتمل التنزيل. قد تكون الجودة غير متاحة أو الرابط مقيدًا.") from exc
+        raise _download_error(
+            exc,
+            "لم يكتمل التنزيل. قد تكون الجودة غير متاحة أو الرابط مقيدًا.",
+        ) from exc
 
     item = RecentDownload(
         id=job_id,

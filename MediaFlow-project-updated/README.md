@@ -53,8 +53,8 @@ VITE_API_URL=http://localhost:8000/api/v1
 | الطريقة | المسار | المهمة |
 | --- | --- | --- |
 | `POST` | `/api/v1/media/inspect` | فحص الرابط وإرجاع البيانات الوصفية والصيغ المتاحة. |
-| `POST` | `/api/v1/media/download` | تنزيل الصيغة المحددة وإرجاع معرف الملف. |
-| `GET` | `/api/v1/downloads/{id}` | تنزيل الملف الذي أنشأته الجلسة. |
+| `POST` | `/api/v1/media/download` | تنزيل الصيغة المحددة وإرجاع ملف الفيديو مباشرة. |
+| `GET` | `/api/v1/downloads/{id}` | مسار توافق لتنزيل ملف أنشأته الجلسة نفسها. |
 | `GET` | `/api/v1/recent` | آخر 10 تنزيلات محلية. |
 | `GET` | `/api/v1/platforms` | قائمة المنصات المسجلة في الخادم. |
 
@@ -90,12 +90,20 @@ npx.cmd firebase-tools deploy --only hosting
 
 ## النشر على Vercel
 
-يحتوي جذر المشروع على `vercel.json` الذي يثبت حزم الواجهة من `frontend/` ويبنيها وينشر `frontend/dist`. هذا يعالج النشر الذي ينتهي سريعًا من دون تنفيذ بناء Vite ثم يعطي خطأ 404.
+يستخدم `vercel.json` وضع **Vercel Services** لبناء تطبيقين مستقلين داخل النشر نفسه:
 
-Vercel يستضيف الواجهة فقط في هذا المشروع. قبل النشر، أضف متغير البيئة التالي في **Project Settings → Environment Variables** وأعد النشر:
+- خدمة `frontend` تبني React/Vite من `frontend/`.
+- خدمة `backend` تشغّل FastAPI من `backend/app/main.py`.
+- خدمة `pot_provider` داخلية تولّد رموز Proof of Origin التي يحتاجها YouTube؛ لا يوجد لها مسار عام، ويتصل بها FastAPI عبر Service Binding فقط.
+- تُوجَّه `/api/**` إلى FastAPI، بينما تُوجَّه بقية المسارات إلى الواجهة.
 
-```text
-VITE_API_URL=https://YOUR_PUBLIC_FASTAPI_HOST/api/v1
-```
+اضبط Framework Preset للمشروع على **Services** قبل النشر. لا يحتاج النشر إلى `VITE_API_URL` لأن الواجهة والخادم يعملان على النطاق نفسه. يستخدم الخادم `/tmp` للملفات المؤقتة على Vercel، لذلك سجل التنزيلات والملفات غير دائمين بين نسخ التشغيل؛ أضف تخزينًا دائمًا عند الحاجة.
 
-استخدم Cloud Run (كما في القسم السابق) أو مضيفًا يدعم حاويات Python مثل Render/Railway لخدمة FastAPI. لا تضع `http://localhost:8000` في Vercel؛ فهو يشير إلى بيئة البناء نفسها وليس إلى خادمك المحلي.
+قد يحظر YouTube عناوين IP التابعة لمراكز البيانات ويطلب التحقق من أن الطلب ليس آليًا. يدعم الخادم عند الحاجة متغيري البيئة التاليين من دون حفظ الأسرار داخل Git:
+
+- `YOUTUBE_COOKIES_BASE64`: محتوى ملف Cookies بصيغة Netscape بعد ترميزه Base64. استخدم حسابًا مخصصًا وبمعدل طلبات منخفض، إذ قد يقيّد YouTube الحساب المستخدم.
+- `YTDLP_PROXY_URL`: عنوان Proxy موثوق يدعم HTTP أو SOCKS، مثل `socks5://user:password@host:port`.
+
+تُكتب Cookies مؤقتًا داخل `/tmp` بصلاحيات مقيدة، ولا تُرسل إلى الواجهة أو تظهر في السجلات.
+
+خدمة `pot-provider/` مبنية على مشروع `bgutil-ytdlp-pot-provider` بالإصدار 1.3.1 وتبقى خاضعة لترخيص GPL-3.0 المرفق داخل مجلدها. تم تحديث قفل حزم npm لإزالة التنبيهات الأمنية المعروفة وقت النشر.

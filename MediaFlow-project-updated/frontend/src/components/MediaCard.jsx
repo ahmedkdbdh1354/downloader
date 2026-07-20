@@ -2,7 +2,7 @@ import { CheckCircle2, ChevronDown, Clock3, Download, Film, LoaderCircle, Monito
 import { useEffect, useState } from 'react'
 import { formatBytes, formatTime } from '../lib'
 
-export default function MediaCard({ media, onDownload, downloading }) {
+export default function MediaCard({ media, onDownload, downloading, downloadProgress }) {
   const [selectedId, setSelectedId] = useState(media.formats[0]?.id ?? '')
   useEffect(() => setSelectedId(media.formats[0]?.id ?? ''), [media])
   const selectedFormat = media.formats.find((format) => format.id === selectedId) ?? media.formats[0]
@@ -40,9 +40,9 @@ export default function MediaCard({ media, onDownload, downloading }) {
         {downloading && <div className="animate-rise-in mt-4 rounded-xl border border-cyan-300/15 bg-cyan-300/[.05] px-3.5 py-3">
           <div className="mb-2.5 flex items-center justify-between gap-3 text-xs">
             <span className="flex items-center gap-2 font-medium text-cyan-100"><LoaderCircle size={15} className="animate-spin text-cyan-300" /> جارٍ تجهيز التنزيل…</span>
-            <span className="shrink-0 text-slate-500">{activeFormat?.label}</span>
+            <span className="shrink-0 text-slate-500">{downloadProgress === null ? activeFormat?.label : `${downloadProgress}%`}</span>
           </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-slate-900/70"><div className="loading-bar h-full w-2/5 rounded-full bg-gradient-to-l from-cyan-300 to-indigo-400" /></div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-slate-900/70"><div className={`h-full rounded-full bg-gradient-to-l from-cyan-300 to-indigo-400 transition-[width] duration-300 ${downloadProgress === null ? 'loading-bar w-2/5' : ''}`} style={downloadProgress === null ? undefined : { width: `${Math.max(downloadProgress, 4)}%` }} /></div>
         </div>}
       </div>
     </div>

@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 
 from .config import settings
 from .providers import provider_registry
-from .schemas import DownloadRequest, DownloadResponse, InspectRequest, MediaInfo, RecentDownload
+from .schemas import DownloadRequest, InspectRequest, MediaInfo, RecentDownload
 from .services import download_media, get_recent, inspect_media
 
 app = FastAPI(title=settings.app_name, version="1.0.0", description="Automatic multi-platform media inspection API")
@@ -16,10 +16,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "Content-Length", "X-MediaFlow-Job"],
 )
 
 
 @app.get("/health")
+@app.get(f"{settings.api_prefix}/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
@@ -34,12 +36,17 @@ def inspect(request: InspectRequest) -> MediaInfo:
     return inspect_media(str(request.url))
 
 
-@app.post(f"{settings.api_prefix}/media/download", response_model=DownloadResponse)
-def download(request: DownloadRequest) -> DownloadResponse:
+@app.post(f"{settings.api_prefix}/media/download")
+def download(request: DownloadRequest) -> FileResponse:
     job_id, file_path = download_media(
         str(request.url), request.format_id, request.title, request.platform, request.thumbnail
     )
-    return DownloadResponse(id=job_id, filename=file_path.name, download_url=f"{settings.api_prefix}/downloads/{job_id}")
+    return FileResponse(
+        path=file_path,
+        filename=file_path.name,
+        media_type="video/mp4",
+        headers={"X-MediaFlow-Job": job_id},
+    )
 
 
 @app.get(f"{settings.api_prefix}/downloads/{{job_id}}")
@@ -56,4 +63,3 @@ def retrieve_download(job_id: str) -> FileResponse:
 @app.get(f"{settings.api_prefix}/recent", response_model=list[RecentDownload])
 def recent_downloads() -> list[RecentDownload]:
     return get_recent()
-
